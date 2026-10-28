@@ -15,12 +15,10 @@ locals {
   )
 
   # One plan and one apply role per environment, e.g. wp-platform-github-dev-plan.
-  ci_roles = merge([
-    for env in var.environments : {
-      "${env}-plan"  = { environment = env, kind = "plan" }
-      "${env}-apply" = { environment = env, kind = "apply" }
-    }
-  ]...)
+  ci_roles = {
+    for pair in setproduct(var.environments, ["plan", "apply"]) :
+    "${pair[0]}-${pair[1]}" => { environment = pair[0], kind = pair[1] }
+  }
 
   ci_role_name_prefix = "${var.project_name}-github-"
 
