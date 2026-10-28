@@ -1,0 +1,19 @@
+aws_region   = "eu-central-1"
+project_name = "wp-platform"
+
+# bucket_name = "my-explicit-bucket-name"
+
+noncurrent_version_retention_days = 90
+
+environments          = ["dev", "prod"]
+github_repository     = "Vilina/wp-platform-infra"
+github_default_branch = "main"
+
+# Set to false if the account already has a token.actions.githubusercontent.com provider.
+create_oidc_provider = true
+
+apply_role_policy_arns = ["arn:aws:iam::aws:policy/AdministratorAccess"]
+
+tags = {
+  Owner = "platform-team"
+}
