@@ -23,6 +23,9 @@ locals {
   ]...)
 
   ci_role_name_prefix = "${var.project_name}-github-"
+
+  # Folder that holds each environment's files, e.g. platform/dev/.
+  state_env_prefix = { for env in var.environments : env => trim("${var.state_key_prefix}/${env}", "/") }
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -131,7 +134,7 @@ data "aws_iam_policy_document" "ci_state" {
   statement {
     sid       = "ReadOwnEnvironment"
     actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.state.arn}/${each.value.environment}/*"]
+    resources = ["${aws_s3_bucket.state.arn}/${local.state_env_prefix[each.value.environment]}/*"]
   }
 
   # Plan only writes the lock file; apply writes state and lock file.
@@ -140,8 +143,8 @@ data "aws_iam_policy_document" "ci_state" {
     actions = ["s3:PutObject", "s3:DeleteObject"]
     resources = (
       each.value.kind == "plan"
-      ? ["${aws_s3_bucket.state.arn}/${each.value.environment}/*.tflock"]
-      : ["${aws_s3_bucket.state.arn}/${each.value.environment}/*"]
+      ? ["${aws_s3_bucket.state.arn}/${local.state_env_prefix[each.value.environment]}/*.tflock"]
+      : ["${aws_s3_bucket.state.arn}/${local.state_env_prefix[each.value.environment]}/*"]
     )
   }
 
@@ -155,7 +158,7 @@ data "aws_iam_policy_document" "ci_state" {
       actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
       resources = [
         for env in var.environments :
-        "${aws_s3_bucket.state.arn}/${env}/*" if env != each.value.environment
+        "${aws_s3_bucket.state.arn}/${local.state_env_prefix[env]}/*" if env != each.value.environment
       ]
     }
   }

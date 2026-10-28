@@ -57,3 +57,9 @@ variable "apply_role_policy_arns" {
   type        = list(string)
   default     = ["arn:aws:iam::aws:policy/AdministratorAccess"]
 }
+
+variable "state_key_prefix" {
+  description = "Prefix in front of each environment's folder in the state bucket (state key platform/<env>/terraform.tfstate). Empty string for <env>/."
+  type        = string
+  default     = "platform"
+}
