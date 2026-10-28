@@ -118,7 +118,7 @@ resource "aws_iam_role_policy_attachment" "apply" {
 }
 
 # -----------------------------------------------------------------------------
-# Permissions: state bucket, scoped to s3://<bucket>/<env>/
+# Permissions: state bucket, scoped to s3://<bucket>/<state_key_prefix>/<env>/
 # -----------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "ci_state" {
