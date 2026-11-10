@@ -1,7 +1,7 @@
 name: Terraform Verify
 
 # Verification for pull requests to main:
-#   fmt -check, validate, Trivy security scan, and a dry-run plan for every environment.
+# fmt -check, validate, Trivy security scan, and a dry-run plan for every environment.
 # Nothing is applied. Results are written to the PR description.
 
 on:
