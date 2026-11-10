@@ -46,6 +46,16 @@ variable "github_repository" {
   default     = "Vilina/wp-platform-infra"
 }
 
+variable "github_oidc_subject_prefix" {
+  description = <<-EOT
+    Start of the OIDC `sub` claim GitHub sends for this repository. Null means repo:<github_repository>.
+    Repos with immutable subjects send repo:<owner>@<owner_id>/<repo>@<repo_id>; check with
+    `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` (sub_claim_prefix).
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "github_default_branch" {
   description = "Branch whose pushes may use the plan roles."
   type        = string

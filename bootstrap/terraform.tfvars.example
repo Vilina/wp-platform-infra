@@ -9,6 +9,10 @@ environments          = ["dev", "prod"]
 github_repository     = "Vilina/wp-platform-infra"
 github_default_branch = "main"
 
+# Only if the repo uses GitHub's immutable OIDC subjects. Get it from:
+# gh api repos/<owner>/<repo>/actions/oidc/customization/sub  (sub_claim_prefix)
+# github_oidc_subject_prefix = "repo:<owner>@<owner_id>/<repo>@<repo_id>"
+
 # Set to false if the account already has a token.actions.githubusercontent.com provider.
 create_oidc_provider = true
 

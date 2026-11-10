@@ -6,7 +6,7 @@ data "aws_partition" "current" {}
 
 locals {
   github_oidc_host = "token.actions.githubusercontent.com"
-  github_repo_sub  = "repo:${var.github_repository}"
+  github_repo_sub  = coalesce(var.github_oidc_subject_prefix, "repo:${var.github_repository}")
 
   oidc_provider_arn = (
     var.create_oidc_provider
