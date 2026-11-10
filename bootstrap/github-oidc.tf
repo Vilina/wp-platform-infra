@@ -146,6 +146,20 @@ data "aws_iam_policy_document" "ci_state" {
     )
   }
 
+  # SSE-KMS: reading state needs Decrypt, writing state or the lock file needs GenerateDataKey.
+  # ReadOnlyAccess (plan roles) doesn't include these.
+  statement {
+    sid       = "UseStateKey"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
+    resources = [aws_kms_key.state.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${var.aws_region}.amazonaws.com"]
+    }
+  }
+
   # ReadOnlyAccess / admin policies would otherwise reach other environments' state.
   dynamic "statement" {
     for_each = length(var.environments) > 1 ? [1] : []
@@ -213,6 +227,23 @@ data "aws_iam_policy_document" "ci_guardrails" {
     resources = [
       aws_s3_bucket.state.arn,
       "${aws_s3_bucket.state.arn}/*"
+    ]
+  }
+
+  # Apply roles have admin, which would otherwise let them disable or delete the state key.
+  statement {
+    sid    = "DenyChangingStateKey"
+    effect = "Deny"
+    not_actions = [
+      "kms:Decrypt",
+      "kms:GenerateDataKey",
+      "kms:Describe*",
+      "kms:Get*",
+      "kms:List*"
+    ]
+    resources = [
+      aws_kms_key.state.arn,
+      aws_kms_alias.state.arn
     ]
   }
 }

@@ -13,6 +13,11 @@ output "bucket_region" {
   value       = aws_s3_bucket.state.region
 }
 
+output "state_kms_key_arn" {
+  description = "ARN of the KMS key that encrypts state. Use it as `kms_key_id` in every backend config."
+  value       = aws_kms_key.state.arn
+}
+
 output "oidc_provider_arn" {
   description = "ARN of the GitHub Actions OIDC provider."
   value       = local.oidc_provider_arn

@@ -22,6 +22,12 @@ variable "noncurrent_version_retention_days" {
   default     = 90
 }
 
+variable "state_kms_deletion_window_in_days" {
+  description = "Days before a scheduled deletion of the state KMS key takes effect (7-30)."
+  type        = number
+  default     = 30
+}
+
 variable "tags" {
   description = "Additional tags applied to all resources through the provider."
   type        = map(string)
