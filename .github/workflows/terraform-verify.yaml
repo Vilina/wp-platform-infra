@@ -1,0 +1,265 @@
+name: Terraform Verify
+
+# Verification for pull requests to main:
+#   fmt -check, validate, Trivy security scan, and a dry-run plan for every environment.
+# Nothing is applied. Results are written to the PR description.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+
+concurrency:
+  group: terraform-verify-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Static checks: no AWS access needed
+  # ---------------------------------------------------------------------------
+  checks:
+    name: Format, validate, security scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ vars.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform format
+        id: fmt
+        continue-on-error: true
+        run: terraform fmt -check -recursive -diff
+
+      - name: Terraform validate
+        id: validate
+        continue-on-error: true
+        run: |
+          # Root platform project and bootstrap are separate Terraform projects.
+          for dir in . bootstrap; do
+            echo "::group::validate $dir"
+            terraform -chdir="$dir" init -backend=false -input=false -no-color
+            terraform -chdir="$dir" validate -no-color
+            echo "::endgroup::"
+          done
+
+      - name: Trivy security scan
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          hide-progress: true
+          format: table
+          output: trivy.txt
+
+      - name: Create report
+        if: always()
+        run: |
+          {
+            echo "### Checks"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| Format | ${{ steps.fmt.outcome }} |"
+            echo "| Validate | ${{ steps.validate.outcome }} |"
+            echo "| Trivy (HIGH, CRITICAL) | ${{ steps.trivy.outcome }} |"
+            echo ""
+            echo "<details>"
+            echo "<summary>Trivy findings</summary>"
+            echo ""
+            echo '```text'
+            head -c 20000 trivy.txt 2>/dev/null || echo "Trivy output unavailable"
+            echo '```'
+            echo "</details>"
+            echo ""
+          } > report-0-checks.md
+
+          cat report-0-checks.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-checks
+          path: report-0-checks.md
+
+      - name: Check result
+        if: always()
+        run: |
+          if [[ \
+            "${{ steps.fmt.outcome }}" != "success" || \
+            "${{ steps.validate.outcome }}" != "success" || \
+            "${{ steps.trivy.outcome }}" != "success" \
+          ]]; then
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Dry-run plan per environment, using the read-only plan roles from bootstrap.
+  # No `environment:` here: the plan roles trust the pull_request OIDC subject.
+  # ---------------------------------------------------------------------------
+  plan:
+    name: Plan (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: dev
+            role_var: AWS_DEV_PLAN_ROLE_ARN
+          - environment: prod
+            role_var: AWS_PROD_PLAN_ROLE_ARN
+
+    env:
+      ENVIRONMENT: ${{ matrix.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ vars.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ vars[matrix.role_var] }}
+          role-session-name: plan-${{ matrix.environment }}-pr-${{ github.event.pull_request.number }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform init
+        id: init
+        continue-on-error: true
+        run: terraform init -input=false -no-color -backend-config="config/${ENVIRONMENT}.backend"
+
+      - name: Terraform plan
+        id: plan
+        continue-on-error: true
+        run: |
+          terraform plan \
+            -input=false \
+            -no-color \
+            -lock-timeout=5m \
+            -var-file="config/${ENVIRONMENT}.tfvars" \
+            -out=tfplan
+
+          terraform show -no-color tfplan > plan.txt
+
+      - name: Create report
+        if: always()
+        run: |
+          summary="$(grep -E '^(Plan:|No changes\.)' plan.txt 2>/dev/null || echo 'Plan unavailable')"
+
+          {
+            echo "### Plan: \`${ENVIRONMENT}\`"
+            echo ""
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Init | ${{ steps.init.outcome }} |"
+            echo "| Plan | ${{ steps.plan.outcome }} |"
+            echo ""
+            echo "**${summary}**"
+            echo ""
+            echo "<details>"
+            echo "<summary>Terraform plan (${ENVIRONMENT})</summary>"
+            echo ""
+            echo '```text'
+            head -c 30000 plan.txt 2>/dev/null || echo "Plan unavailable"
+            echo '```'
+            echo "</details>"
+            echo ""
+          } > "report-1-${ENVIRONMENT}.md"
+
+          cat "report-1-${ENVIRONMENT}.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-plan-${{ matrix.environment }}
+          path: report-1-${{ matrix.environment }}.md
+
+      - name: Check result
+        if: always()
+        run: |
+          if [[ "${{ steps.init.outcome }}" != "success" || "${{ steps.plan.outcome }}" != "success" ]]; then
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Combine all reports into the PR description
+  # ---------------------------------------------------------------------------
+  report:
+    name: Update PR description
+    needs: [checks, plan]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Download reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: report-*
+          merge-multiple: true
+
+      - name: Update PR description
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "<!-- terraform-ci:start -->"
+            echo "## Terraform Verify"
+            echo ""
+            cat $(ls report-*.md | sort)
+            echo "<!-- terraform-ci:end -->"
+          } > terraform-report.md
+
+          gh pr view "$PR_NUMBER" --json body --jq '.body // ""' > body.md
+
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          body = Path("body.md").read_text()
+          report = Path("terraform-report.md").read_text()
+
+          marker = r"<!-- terraform-ci:start -->.*?<!-- terraform-ci:end -->"
+
+          if re.search(marker, body, re.S):
+              body = re.sub(marker, lambda _: report, body, flags=re.S)
+          else:
+              body = body.rstrip() + "\n\n" + report
+
+          Path("body.md").write_text(body)
+          PY
+
+          gh pr edit "$PR_NUMBER" --body-file body.md
