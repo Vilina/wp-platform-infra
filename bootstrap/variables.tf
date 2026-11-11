@@ -22,6 +22,12 @@ variable "noncurrent_version_retention_days" {
   default     = 90
 }
 
+variable "state_kms_deletion_window_in_days" {
+  description = "Days before a scheduled deletion of the state KMS key takes effect (7-30)."
+  type        = number
+  default     = 30
+}
+
 variable "tags" {
   description = "Additional tags applied to all resources through the provider."
   type        = map(string)
@@ -38,6 +44,16 @@ variable "github_repository" {
   description = "GitHub repository allowed to assume the CI roles, as <owner>/<repo>."
   type        = string
   default     = "Vilina/wp-platform-infra"
+}
+
+variable "github_oidc_subject_prefix" {
+  description = <<-EOT
+    Start of the OIDC `sub` claim GitHub sends for this repository. Null means repo:<github_repository>.
+    Repos with immutable subjects send repo:<owner>@<owner_id>/<repo>@<repo_id>; check with
+    `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` (sub_claim_prefix).
+  EOT
+  type        = string
+  default     = null
 }
 
 variable "github_default_branch" {

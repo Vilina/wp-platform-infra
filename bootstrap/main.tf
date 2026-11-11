@@ -50,13 +50,51 @@ resource "aws_s3_bucket_versioning" "state" {
   }
 }
 
+# -----------------------------------------------------------------------------
+# Encryption: customer managed KMS key (SSE-KMS)
+# -----------------------------------------------------------------------------
+
+# Account root gets kms:*, so access is granted through IAM policies
+# (the CI roles get it in github-oidc.tf).
+data "aws_iam_policy_document" "state_kms" {
+  statement {
+    sid       = "AccountAdministration"
+    actions   = ["kms:*"]
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+}
+
+resource "aws_kms_key" "state" {
+  description             = "Encrypts Terraform state in ${local.bucket_name}"
+  enable_key_rotation     = true
+  deletion_window_in_days = var.state_kms_deletion_window_in_days
+  policy                  = data.aws_iam_policy_document.state_kms.json
+
+  # Deleting this key makes every state file unreadable.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_kms_alias" "state" {
+  name          = "alias/${var.project_name}-tfstate"
+  target_key_id = aws_kms_key.state.key_id
+}
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "state" {
   bucket = aws_s3_bucket.state.id
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.state.arn
     }
+    # Caches a data key per bucket, cutting KMS requests (and cost) sharply.
     bucket_key_enabled = true
   }
 }
