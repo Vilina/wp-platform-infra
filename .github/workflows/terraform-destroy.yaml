@@ -1,0 +1,161 @@
+name: Terraform Destroy
+
+# Manual only: Actions → Terraform Destroy → Run workflow.
+#   1. Check the confirmation (must repeat the environment name)
+#   2. Make a destroy plan with the read-only plan role, shown in the run summary
+#   3. Apply that exact plan in the chosen GitHub environment
+#      (prod waits for its required reviewers before this step starts)
+#
+# Destroy the application repository's resources first: the ALB uses this
+# repo's certificate and subnets, and its stack reads the SSM exports.
+# The Route 53 hosted zone is only looked up, so it is never destroyed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to destroy
+        type: choice
+        options:
+          - dev
+          - prod
+        required: true
+      confirmation:
+        description: Type the environment name again to confirm
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+  ENVIRONMENT: ${{ inputs.environment }}
+
+# Same group as Terraform Apply, so a destroy never overlaps a deployment.
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Destroy plan: read-only role, no environment (no approval needed to look)
+  # ---------------------------------------------------------------------------
+  plan:
+    name: Destroy plan (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+
+    steps:
+      - name: Check confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          if [[ "$CONFIRMATION" != "$ENVIRONMENT" ]]; then
+            echo "::error::Confirmation '$CONFIRMATION' doesn't match environment '$ENVIRONMENT'. Nothing was destroyed."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ vars.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ inputs.environment == 'prod' && vars.AWS_PROD_PLAN_ROLE_ARN || vars.AWS_DEV_PLAN_ROLE_ARN }}
+          role-session-name: destroy-plan-${{ inputs.environment }}-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -input=false -no-color -backend-config="config/${ENVIRONMENT}.backend"
+
+      - name: Terraform destroy plan
+        id: plan
+        run: |
+          # -detailed-exitcode: 0 = nothing to destroy, 2 = changes, 1 = error
+          set +e
+          terraform plan \
+            -destroy \
+            -input=false \
+            -no-color \
+            -lock-timeout=5m \
+            -detailed-exitcode \
+            -var-file="config/${ENVIRONMENT}.tfvars" \
+            -out=tfplan
+          code=$?
+          set -e
+
+          if [[ $code -eq 1 ]]; then exit 1; fi
+          echo "has_changes=$([[ $code -eq 2 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+          terraform show -no-color tfplan > plan.txt
+
+      - name: Plan summary
+        if: always()
+        run: .github/scripts/plan-summary.sh "$ENVIRONMENT (destroy)" plan.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-destroy-${{ inputs.environment }}
+          path: tfplan
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Destroy: runs in the GitHub environment, so the apply role can be assumed
+  # and prod's required reviewers must approve first.
+  # ---------------------------------------------------------------------------
+  destroy:
+    name: Destroy (${{ inputs.environment }})
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ vars.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          role-session-name: destroy-${{ inputs.environment }}-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-destroy-${{ inputs.environment }}
+
+      - name: Terraform init
+        run: terraform init -input=false -no-color -backend-config="config/${ENVIRONMENT}.backend"
+
+      # Applying a saved destroy plan destroys exactly what was reviewed.
+      # It is refused if the state changed since the plan was made.
+      - name: Terraform destroy
+        run: terraform apply -input=false -no-color -lock-timeout=5m tfplan
