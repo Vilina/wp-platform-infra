@@ -69,9 +69,38 @@ variable "create_oidc_provider" {
 }
 
 variable "apply_role_policy_arns" {
-  description = "Managed policies attached to every apply role. Narrow this once the platform's resource types are known."
-  type        = list(string)
-  default     = ["arn:aws:iam::aws:policy/AdministratorAccess"]
+  description = "Managed policies attached to each environment's apply role, keyed by environment."
+  type        = map(list(string))
+  default = {
+    dev  = ["arn:aws:iam::aws:policy/AdministratorAccess"]
+    prod = ["arn:aws:iam::aws:policy/AdministratorAccess"]
+  }
+
+  validation {
+    condition     = alltrue([for env in keys(var.apply_role_policy_arns) : contains(var.environments, env)])
+    error_message = "Every key in apply_role_policy_arns must be listed in environments."
+  }
+}
+
+variable "tag_scoped_apply_environments" {
+  description = <<-EOT
+    Environments that get a "may only touch resources tagged Environment=<env>" policy,
+    keyed by environment. The names cover things AWS can't tag:
+      name_prefix: platform resource name prefix, e.g. dev-wp (KMS aliases)
+      ssm_path:    SSM export path, e.g. /platform/dev
+      dns_names:   Route 53 record names, e.g. dev.example.com, *.dev.example.com
+  EOT
+  type = map(object({
+    name_prefix = string
+    ssm_path    = string
+    dns_names   = list(string)
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for env in keys(var.tag_scoped_apply_environments) : contains(var.environments, env)])
+    error_message = "Every key in tag_scoped_apply_environments must be listed in environments."
+  }
 }
 
 variable "state_key_prefix" {

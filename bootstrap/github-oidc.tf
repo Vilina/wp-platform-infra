@@ -104,12 +104,12 @@ resource "aws_iam_role_policy_attachment" "plan_read_only" {
 }
 
 resource "aws_iam_role_policy_attachment" "apply" {
-  for_each = {
-    for pair in setproduct(
-      [for k, v in local.ci_roles : k if v.kind == "apply"],
-      var.apply_role_policy_arns
-    ) : "${pair[0]}|${pair[1]}" => { role = pair[0], policy_arn = pair[1] }
-  }
+  # Each apply role gets only its own environment's list, e.g. dev-apply|<arn>.
+  for_each = merge([
+    for env, arns in var.apply_role_policy_arns : {
+      for arn in arns : "${env}-apply|${arn}" => { role = "${env}-apply", policy_arn = arn }
+    }
+  ]...)
 
   role       = aws_iam_role.ci[each.value.role].name
   policy_arn = each.value.policy_arn
@@ -254,4 +254,158 @@ resource "aws_iam_role_policy" "ci_guardrails" {
   name   = "bootstrap-guardrails"
   role   = aws_iam_role.ci[each.key].id
   policy = data.aws_iam_policy_document.ci_guardrails.json
+}
+
+# -----------------------------------------------------------------------------
+# Tag-scoped apply policy (e.g. dev)
+#
+# "May only touch things tagged Environment=<env>". No services or actions are
+# listed, so new taggable resource types in the platform need no change here.
+# The platform's default_tags put the Environment tag on every resource.
+# -----------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "tag_scoped_apply" {
+  for_each = var.tag_scoped_apply_environments
+
+  # Creating: the new resource must carry this environment's tag.
+  statement {
+    sid       = "AllowCreateWithEnvironmentTag"
+    actions   = ["*"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = [each.key]
+    }
+  }
+
+  # Changing or deleting: the resource must already carry the tag.
+  statement {
+    sid       = "AllowManageEnvironmentResources"
+    actions   = ["*"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = [each.key]
+    }
+  }
+
+  # --- Things AWS can't tag, allowed by name ---------------------------------
+
+  statement {
+    sid       = "AllowEnvironmentKmsAliases"
+    actions   = ["kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias"]
+    resources = ["arn:${data.aws_partition.current.partition}:kms:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alias/${each.value.name_prefix}-*"]
+  }
+
+  # SSM parameters can't be tagged in the same call that overwrites them.
+  statement {
+    sid = "AllowEnvironmentSsmParameters"
+    actions = [
+      "ssm:PutParameter",
+      "ssm:DeleteParameter",
+      "ssm:DeleteParameters",
+      "ssm:AddTagsToResource",
+      "ssm:RemoveTagsFromResource"
+    ]
+    resources = ["arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${each.value.ssm_path}/*"]
+  }
+
+  statement {
+    sid       = "AllowEnvironmentDnsRecords"
+    actions   = ["route53:ChangeResourceRecordSets"]
+    resources = ["arn:${data.aws_partition.current.partition}:route53:::hostedzone/*"]
+
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "route53:ChangeResourceRecordSetsNormalizedRecordNames"
+      values   = each.value.dns_names
+    }
+  }
+
+  # --- Denies (always win over the allows above) ------------------------------
+
+  # Nothing tagged for another environment, e.g. no dev subnet in the prod VPC.
+  statement {
+    sid       = "DenyOtherEnvironmentsResources"
+    effect    = "Deny"
+    actions   = ["*"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = [for env in var.environments : env if env != each.key]
+    }
+  }
+
+  # The Environment tag can't be set to another value or removed.
+  statement {
+    sid       = "DenyOtherEnvironmentTag"
+    effect    = "Deny"
+    actions   = ["*"]
+    resources = ["*"]
+
+    condition {
+      test     = "ForAnyValue:StringEquals"
+      variable = "aws:TagKeys"
+      values   = ["Environment"]
+    }
+
+    condition {
+      test     = "StringNotEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = [each.key]
+    }
+  }
+
+  # Existing untagged EC2 resources (like the default VPC) can't be claimed by
+  # tagging them: tags are only allowed while creating, or on own resources.
+  statement {
+    sid       = "DenyClaimingEc2Resources"
+    effect    = "Deny"
+    actions   = ["ec2:CreateTags"]
+    resources = ["*"]
+
+    condition {
+      test     = "Null"
+      variable = "ec2:CreateAction"
+      values   = ["true"]
+    }
+
+    condition {
+      test     = "StringNotEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = [each.key]
+    }
+  }
+
+  # Without this the role could create a role tagged for its environment,
+  # give it admin and switch to it. Also blocks assuming other roles.
+  statement {
+    sid         = "DenyIamChanges"
+    effect      = "Deny"
+    not_actions = ["iam:Get*", "iam:List*"]
+    resources   = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:*"]
+  }
+}
+
+resource "aws_iam_policy" "tag_scoped_apply" {
+  for_each = var.tag_scoped_apply_environments
+
+  name        = "${local.ci_role_name_prefix}${each.key}-tag-scoped-apply"
+  description = "Allows changes only to resources tagged Environment=${each.key}"
+  policy      = data.aws_iam_policy_document.tag_scoped_apply[each.key].json
+}
+
+# Attached by code because the policy's ARN doesn't exist until it is created.
+# Pair it with ReadOnlyAccess in apply_role_policy_arns: the policy only covers changes.
+resource "aws_iam_role_policy_attachment" "tag_scoped_apply" {
+  for_each = var.tag_scoped_apply_environments
+
+  role       = aws_iam_role.ci["${each.key}-apply"].name
+  policy_arn = aws_iam_policy.tag_scoped_apply[each.key].arn
 }
