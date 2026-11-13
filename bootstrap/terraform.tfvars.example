@@ -16,7 +16,20 @@ github_default_branch = "main"
 # Set to false if the account already has a token.actions.githubusercontent.com provider.
 create_oidc_provider = true
 
-apply_role_policy_arns = ["arn:aws:iam::aws:policy/AdministratorAccess"]
+apply_role_policy_arns = {
+  dev  = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
+  prod = ["arn:aws:iam::aws:policy/AdministratorAccess"]
+}
+
+# Gives these apply roles a "may only touch resources tagged Environment=<env>" policy.
+# Their apply_role_policy_arns entry should then be ReadOnlyAccess, not AdministratorAccess.
+tag_scoped_apply_environments = {
+  dev = {
+    name_prefix = "dev-wp"
+    ssm_path    = "/platform/dev"
+    dns_names   = ["dev.example.com", "*.dev.example.com"]
+  }
+}
 
 tags = {
   Owner = "platform-team"

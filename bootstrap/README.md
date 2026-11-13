@@ -23,7 +23,15 @@ Every role also:
 - is denied access to the other environment's state prefix and to `bootstrap/*`
 - is denied changes to the `wp-platform-github-*` roles, the OIDC provider, and the state bucket's settings (policy, versioning, encryption, deleting object versions), so CI can't widen its own access or wipe state history
 
-Apply roles default to `AdministratorAccess`. Because dev and prod share an account, the dev apply role can technically change prod resources. Only the state is separated. Narrow `apply_role_policy_arns` (or add a permissions boundary) once the platform's resource types are known.
+Apply role permissions are set per environment in `apply_role_policy_arns`. Dev and prod share an account, so an apply role with `AdministratorAccess` can change the other environment's resources; only the state is separated.
+
+Environments listed in `tag_scoped_apply_environments` (dev) get a custom policy instead, paired with `ReadOnlyAccess`:
+
+- allows changes only to resources created with, or carrying, the tag `Environment=<env>` (set by the platform's `default_tags`)
+- allows untaggable things by name: KMS aliases `alias/<name_prefix>-*`, SSM parameters under `<ssm_path>/`, Route 53 records matching `dns_names`
+- denies anything on resources tagged for another environment, changing or removing the `Environment` tag, and all IAM changes (so the role can't create a more powerful role for itself)
+
+A new taggable resource type needs no policy change. A new untaggable one shows up as `AccessDenied` in the dev apply job and needs a name-based rule in `github-oidc.tf`.
 
 If the account already has a `token.actions.githubusercontent.com` OIDC provider, set `create_oidc_provider = false`.
 
