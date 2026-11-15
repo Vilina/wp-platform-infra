@@ -13,6 +13,15 @@ github_default_branch = "main"
 # gh api repos/<owner>/<repo>/actions/oidc/customization/sub  (sub_claim_prefix)
 # github_oidc_subject_prefix = "repo:<owner>@<owner_id>/<repo>@<repo_id>"
 
+# Other repositories that get the same set of CI roles, e.g. the application repo.
+# additional_repositories = {
+#   app = {
+#     repository          = "<owner>/<app-repo>"
+#     oidc_subject_prefix = "repo:<owner>@<owner_id>/<app-repo>@<repo_id>"
+#     state_key_prefix    = "app"
+#   }
+# }
+
 # Set to false if the account already has a token.actions.githubusercontent.com provider.
 create_oidc_provider = true
 
