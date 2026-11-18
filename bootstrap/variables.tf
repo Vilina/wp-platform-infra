@@ -56,6 +56,30 @@ variable "github_oidc_subject_prefix" {
   default     = null
 }
 
+variable "additional_repositories" {
+  description = <<-EOT
+    Other repositories that get the same set of CI roles (<key>-<env>-plan/apply), e.g. the
+    application repo. Permissions per environment are shared with this repo's roles.
+      repository:          <owner>/<repo>
+      oidc_subject_prefix: as github_oidc_subject_prefix; null means repo:<repository>
+      state_key_prefix:    folder in the state bucket, e.g. app (state key app/<env>/terraform.tfstate)
+  EOT
+  type = map(object({
+    repository          = string
+    oidc_subject_prefix = optional(string)
+    state_key_prefix    = string
+  }))
+  default = {}
+
+  validation {
+    condition = alltrue([
+      for repo in values(var.additional_repositories) :
+      repo.state_key_prefix != "" && repo.state_key_prefix != "bootstrap" && repo.state_key_prefix != var.state_key_prefix
+    ])
+    error_message = "Each additional repository needs its own state_key_prefix (not empty, not \"bootstrap\", not this repo's state_key_prefix)."
+  }
+}
+
 variable "github_default_branch" {
   description = "Branch whose pushes may use the plan roles."
   type        = string

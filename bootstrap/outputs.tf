@@ -24,6 +24,6 @@ output "oidc_provider_arn" {
 }
 
 output "ci_role_arns" {
-  description = "GitHub Actions role ARNs, keyed <env>-plan / <env>-apply. Store them as GitHub environment secrets."
+  description = "GitHub Actions role ARNs, keyed <env>-plan / <env>-apply (this repo) and <repo>-<env>-plan / -apply (additional repositories)."
   value       = { for k, r in aws_iam_role.ci : k => r.arn }
 }

@@ -18,9 +18,11 @@ GitHub Actions gets short-lived AWS credentials through OIDC, so no AWS access k
 | `wp-platform-github-prod-plan` | pull requests, pushes to `main` | `ReadOnlyAccess` | read `prod/*`, write lock file |
 | `wp-platform-github-prod-apply` | jobs with `environment: prod` | `apply_role_policy_arns` | read/write `prod/*` |
 
+Repositories listed in `additional_repositories` (the application repo, `app`) get the same four roles, named `wp-platform-github-<key>-<env>-plan|apply`. They trust that repository instead, keep their state under `<state_key_prefix>/<env>/`, and share each environment's permissions with the roles above.
+
 Every role also:
 
-- is denied access to the other environment's state prefix and to `bootstrap/*`
+- is denied access to every other state prefix (other environments, other repositories) and to `bootstrap/*`
 - is denied changes to the `wp-platform-github-*` roles, the OIDC provider, and the state bucket's settings (policy, versioning, encryption, deleting object versions), so CI can't widen its own access or wipe state history
 
 Apply role permissions are set per environment in `apply_role_policy_arns`. Dev and prod share an account, so an apply role with `AdministratorAccess` can change the other environment's resources; only the state is separated.

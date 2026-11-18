@@ -15,15 +15,38 @@ locals {
   )
 
   # One plan and one apply role per environment, e.g. wp-platform-github-dev-plan.
-  ci_roles = {
+  # state_prefix is the folder that holds the environment's files, e.g. platform/dev.
+  own_ci_roles = {
     for pair in setproduct(var.environments, ["plan", "apply"]) :
-    "${pair[0]}-${pair[1]}" => { environment = pair[0], kind = pair[1] }
+    "${pair[0]}-${pair[1]}" => {
+      environment  = pair[0]
+      kind         = pair[1]
+      repository   = var.github_repository
+      subject      = local.github_repo_sub
+      state_prefix = trim("${var.state_key_prefix}/${pair[0]}", "/")
+    }
   }
+
+  # The same set for every additional repository, keyed <repo>-<env>-<kind>,
+  # e.g. app-dev-plan (role wp-platform-github-app-dev-plan, state app/dev).
+  additional_ci_roles = merge([
+    for repo_key, repo in var.additional_repositories : {
+      for pair in setproduct(var.environments, ["plan", "apply"]) :
+      "${repo_key}-${pair[0]}-${pair[1]}" => {
+        environment  = pair[0]
+        kind         = pair[1]
+        repository   = repo.repository
+        subject      = coalesce(repo.oidc_subject_prefix, "repo:${repo.repository}")
+        state_prefix = "${repo.state_key_prefix}/${pair[0]}"
+      }
+    }
+  ]...)
+
+  ci_roles = merge(local.own_ci_roles, local.additional_ci_roles)
 
   ci_role_name_prefix = "${var.project_name}-github-"
 
-  # Folder that holds each environment's files, e.g. platform/dev/.
-  state_env_prefix = { for env in var.environments : env => trim("${var.state_key_prefix}/${env}", "/") }
+  ci_state_prefixes = distinct([for role in local.ci_roles : role.state_prefix])
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -70,10 +93,10 @@ data "aws_iam_policy_document" "ci_trust" {
       values = (
         each.value.kind == "plan"
         ? [
-          "${local.github_repo_sub}:pull_request",
-          "${local.github_repo_sub}:ref:refs/heads/${var.github_default_branch}"
+          "${each.value.subject}:pull_request",
+          "${each.value.subject}:ref:refs/heads/${var.github_default_branch}"
         ]
-        : ["${local.github_repo_sub}:environment:${each.value.environment}"]
+        : ["${each.value.subject}:environment:${each.value.environment}"]
       )
     }
   }
@@ -83,7 +106,7 @@ resource "aws_iam_role" "ci" {
   for_each = local.ci_roles
 
   name                 = "${local.ci_role_name_prefix}${each.key}"
-  description          = "GitHub Actions ${each.value.kind} role for ${var.github_repository} (${each.value.environment})"
+  description          = "GitHub Actions ${each.value.kind} role for ${each.value.repository} (${each.value.environment})"
   assume_role_policy   = data.aws_iam_policy_document.ci_trust[each.key].json
   max_session_duration = 3600
 
@@ -104,11 +127,12 @@ resource "aws_iam_role_policy_attachment" "plan_read_only" {
 }
 
 resource "aws_iam_role_policy_attachment" "apply" {
-  # Each apply role gets only its own environment's list, e.g. dev-apply|<arn>.
+  # Each apply role gets its environment's list, e.g. dev-apply|<arn>, app-dev-apply|<arn>.
   for_each = merge([
-    for env, arns in var.apply_role_policy_arns : {
-      for arn in arns : "${env}-apply|${arn}" => { role = "${env}-apply", policy_arn = arn }
-    }
+    for role_key, role in local.ci_roles : {
+      for arn in lookup(var.apply_role_policy_arns, role.environment, []) :
+      "${role_key}|${arn}" => { role = role_key, policy_arn = arn }
+    } if role.kind == "apply"
   ]...)
 
   role       = aws_iam_role.ci[each.value.role].name
@@ -116,7 +140,7 @@ resource "aws_iam_role_policy_attachment" "apply" {
 }
 
 # -----------------------------------------------------------------------------
-# Permissions: state bucket, scoped to s3://<bucket>/<state_key_prefix>/<env>/
+# Permissions: state bucket, scoped to the role's own folder, e.g. platform/dev/ or app/dev/
 # -----------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "ci_state" {
@@ -132,7 +156,7 @@ data "aws_iam_policy_document" "ci_state" {
   statement {
     sid       = "ReadOwnEnvironment"
     actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.state.arn}/${local.state_env_prefix[each.value.environment]}/*"]
+    resources = ["${aws_s3_bucket.state.arn}/${each.value.state_prefix}/*"]
   }
 
   # Plan only writes the lock file; apply writes state and lock file.
@@ -141,8 +165,8 @@ data "aws_iam_policy_document" "ci_state" {
     actions = ["s3:PutObject", "s3:DeleteObject"]
     resources = (
       each.value.kind == "plan"
-      ? ["${aws_s3_bucket.state.arn}/${local.state_env_prefix[each.value.environment]}/*.tflock"]
-      : ["${aws_s3_bucket.state.arn}/${local.state_env_prefix[each.value.environment]}/*"]
+      ? ["${aws_s3_bucket.state.arn}/${each.value.state_prefix}/*.tflock"]
+      : ["${aws_s3_bucket.state.arn}/${each.value.state_prefix}/*"]
     )
   }
 
@@ -160,17 +184,18 @@ data "aws_iam_policy_document" "ci_state" {
     }
   }
 
-  # ReadOnlyAccess / admin policies would otherwise reach other environments' state.
+  # ReadOnlyAccess / admin policies would otherwise reach the state of other
+  # environments and other repositories.
   dynamic "statement" {
-    for_each = length(var.environments) > 1 ? [1] : []
+    for_each = length(local.ci_state_prefixes) > 1 ? [1] : []
 
     content {
       sid     = "DenyOtherEnvironments"
       effect  = "Deny"
       actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
       resources = [
-        for env in var.environments :
-        "${aws_s3_bucket.state.arn}/${local.state_env_prefix[env]}/*" if env != each.value.environment
+        for prefix in local.ci_state_prefixes :
+        "${aws_s3_bucket.state.arn}/${prefix}/*" if prefix != each.value.state_prefix
       ]
     }
   }
@@ -404,8 +429,12 @@ resource "aws_iam_policy" "tag_scoped_apply" {
 # Attached by code because the policy's ARN doesn't exist until it is created.
 # Pair it with ReadOnlyAccess in apply_role_policy_arns: the policy only covers changes.
 resource "aws_iam_role_policy_attachment" "tag_scoped_apply" {
-  for_each = var.tag_scoped_apply_environments
+  # Every repository's apply role for a scoped environment, keyed dev, app-dev, ...
+  for_each = {
+    for role_key, role in local.ci_roles : trimsuffix(role_key, "-apply") => role
+    if role.kind == "apply" && contains(keys(var.tag_scoped_apply_environments), role.environment)
+  }
 
   role       = aws_iam_role.ci["${each.key}-apply"].name
-  policy_arn = aws_iam_policy.tag_scoped_apply[each.key].arn
+  policy_arn = aws_iam_policy.tag_scoped_apply[each.value.environment].arn
 }
