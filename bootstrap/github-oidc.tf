@@ -318,6 +318,15 @@ data "aws_iam_policy_document" "tag_scoped_apply" {
     }
   }
 
+  # EC2 can't resolve the resource for these calls (e.g. DisassociateAddress
+  # by association ID, used when destroying NAT Elastic IPs), so the error shows
+  # resource */* and tag conditions never match. Allowed without one.
+  statement {
+    sid       = "AllowEc2ActionsWithoutResource"
+    actions   = ["ec2:DisassociateAddress"]
+    resources = ["*"]
+  }
+
   # --- Things AWS can't tag, allowed by name ---------------------------------
 
   statement {
